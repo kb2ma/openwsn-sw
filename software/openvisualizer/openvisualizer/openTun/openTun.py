@@ -41,7 +41,6 @@ def create():
         
     else:
         raise NotImplementedError('Platform {0} not supported'.format(sys.platform))
-        
 
 class OpenTun(eventBusClient.eventBusClient):
     '''
@@ -63,16 +62,24 @@ class OpenTun(eventBusClient.eventBusClient):
             name                  = 'OpenTun',
             registrations         = [
                 {
+                    'sender'      : self.WILDCARD,
+                    'signal'      : 'getNetworkPrefix',
+                    'callback'    : self._getNetworkPrefix_notif,
+                },
+                {
                     'sender'   : self.WILDCARD,
                     'signal'   : 'v6ToInternet',
                     'callback' : self._v6ToInternet_notif
-                }
+                },
             ]
         )
         
         # local variables
         self.tunIf                = self._createTunIf()
-        self.tunReadThread        = self._createTunReadThread()
+        if self.tunIf:
+            self.tunReadThread    = self._createTunReadThread()
+        else:
+            self.tunReadThread    = None
         
         # TODO: retrieve network prefix from interface settings
         
@@ -81,30 +88,32 @@ class OpenTun(eventBusClient.eventBusClient):
             signal        = 'networkPrefix',
             data          = IPV6PREFIX
         )
-        
     
     #======================== public ==========================================
     
     def close(self):
-        self.tunReadThread.close()
         
-        # Send a packet to openTun interface to break out of blocking read.
-        attempts = 0
-        while self.tunReadThread.isAlive() and attempts < 3:
-            attempts += 1
-            try:
-                log.info('Sending UDP packet to close openTun')
-                sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-                # Destination must route through the TUN host, but not be the host itself.
-                # OK if host does not really exist.
-                dst      = IPV6PREFIX + IPV6HOST
-                dst[15] += 1
-                # Payload and destination port are arbitrary
-                sock.sendto('stop', (u.formatIPv6Addr(dst),18004))
-                # Give thread some time to exit
-                time.sleep(0.05)
-            except Exception as err:
-                log.error('Unable to send UDP to close tunReadThread: {0}'.join(err))
+        if self.tunReadThread:
+            
+            self.tunReadThread.close()
+            
+            # Send a packet to openTun interface to break out of blocking read.
+            attempts = 0
+            while self.tunReadThread.isAlive() and attempts < 3:
+                attempts += 1
+                try:
+                    log.info('Sending UDP packet to close openTun')
+                    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                    # Destination must route through the TUN host, but not be the host itself.
+                    # OK if host does not really exist.
+                    dst      = IPV6PREFIX + IPV6HOST
+                    dst[15] += 1
+                    # Payload and destination port are arbitrary
+                    sock.sendto('stop', (u.formatIPv6Addr(dst),18004))
+                    # Give thread some time to exit
+                    time.sleep(0.05)
+                except Exception as err:
+                    log.error('Unable to send UDP to close tunReadThread: {0}'.join(err))
     
     #======================== private =========================================
     
@@ -116,6 +125,9 @@ class OpenTun(eventBusClient.eventBusClient):
         Read from tun interface and forward to 6lowPAN
         '''
         raise NotImplementedError('subclass must implement')
+    
+    def _getNetworkPrefix_notif(self,sender,signal,data):
+        return IPV6PREFIX
     
     def _v6ToMesh_notif(self,data):
         '''
