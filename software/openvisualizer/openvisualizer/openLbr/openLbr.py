@@ -11,6 +11,7 @@ log.addHandler(logging.NullHandler())
 from openvisualizer.eventBus import eventBusClient
 import threading
 import openvisualizer.openvisualizer_utils as u
+from openvisualizer.openTun.openTun import IPV6PREFIX, IPV6HOST
 
 #============================ parameters ======================================
 
@@ -157,6 +158,18 @@ class OpenLbr(eventBusClient.eventBusClient):
             if ipv6['dst_addr'][0]==0xff:
                 return
             
+            # Dispatch DAGroot UDP packet to local application handler
+            if (ipv6['dst_addr'][0:8]==IPV6PREFIX and ipv6['dst_addr'][8:]==self.dagRootEui64):
+                if (ipv6['next_header']==self.IANA_UDP):
+                    # Read UDP header. TODO parse UDP to dictionary as meshToV6 does?
+                    udp_dest_port  = ipv6['payload'][2:4]
+                    dispatchSignal = (tuple(ipv6['dst_addr']), self.PROTO_UDP, tuple(udp_dest_port))
+
+                    log.info('v6ToMesh UDP packet; dispatching addr,proto,port event')
+                    success = self._dispatchProtocol(dispatchSignal,(ipv6['src_addr'],ipv6['payload']))    
+                    if success == True:
+                        return
+
             # log
             if log.isEnabledFor(logging.DEBUG):
                 log.debug(self._format_IPv6(ipv6,ipv6_bytes))

@@ -17,6 +17,7 @@ from openvisualizer.eventBus      import eventBusMonitor
 from openvisualizer.moteProbe     import moteProbe
 from openvisualizer.moteConnector import moteConnector
 from openvisualizer.moteState     import moteState
+from openvisualizer.nethead       import nethead
 from openvisualizer.RPL           import RPL
 from openvisualizer.openLbr       import openLbr
 from openvisualizer.openTun       import openTun
@@ -50,6 +51,7 @@ class OpenVisualizerApp(object):
         self.rpl                  = RPL.RPL()
         self.topology             = topology.topology()
         self.udpLatency           = UDPLatency.UDPLatency()
+        self.nethead              = nethead.Nethead()
         # create openTun call last since indicates prefix
         self.openTun              = openTun.create() 
         if self.simulatorMode:

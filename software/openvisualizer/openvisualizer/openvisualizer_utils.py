@@ -116,6 +116,29 @@ def calculatePseudoHeaderCRC(src,dst,length,nh,payload):
     
     return checksum
 
+def calculateUdpChecksum(pseudoHeader, header, payload):
+    '''
+    See these references: 
+    
+    * http://tools.ietf.org/html/rfc768
+    * http://en.wikipedia.org/wiki/User_Datagram_Protocol#IPv6_PSEUDO-HEADER
+    * http://www-net.cs.umass.edu/kurose/transport/UDP.html
+    * http://tools.ietf.org/html/rfc1071
+    '''
+    
+    checksum       = [0x00]*2
+    checksum       = _oneComplementSum(pseudoHeader,checksum)
+    checksum       = _oneComplementSum(header,checksum)
+    checksum       = _oneComplementSum(payload,checksum)
+    
+    checksum[0]   ^= 0xFF;
+    checksum[1]   ^= 0xFF;
+    
+    checksum[0]   = int(checksum[0]);
+    checksum[1]   = int(checksum[1]);
+    
+    return checksum
+
 def _oneComplementSum(field,checksum):
         
     sum            = 0xFFFF & (checksum[0] << 8 | checksum[1])
