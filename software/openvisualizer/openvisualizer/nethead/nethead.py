@@ -8,12 +8,14 @@ log = logging.getLogger('nethead')
 log.setLevel(logging.ERROR)
 log.addHandler(logging.NullHandler())
 
+import json
 from   openvisualizer.eventBus import eventBusClient
+from   openvisualizer.nethead.messenger import Messenger
 from   openvisualizer.openLbr.openLbr import OpenLbr
 import openvisualizer.openvisualizer_utils as u
 import random
 from   soscoap.message import CoapMessage, CoapOption
-from   soscoap import CodeClass, MessageType, OptionType, RequestCode
+from   soscoap import CodeClass, MediaType, MessageType, OptionType, RequestCode
 from   soscoap import message as msgModule
 import threading
 
@@ -41,6 +43,19 @@ def int2buf(intVal, length):
         intVal   = intVal >> 8
         pos      = pos - 1
     return buf
+    
+def buf2hex(addr):
+    '''
+    Converts a byte list into a string of hex chars. For example:
+
+       [0xab,0xcd,0xef,0x00] -> 'abcdef00'
+    
+    :param addr: [in] Byte list to convert
+    
+    :returns: String with the contents of addr.
+    '''
+    return ''.join(["%02x" % b for b in addr])
+
 
 class Nethead(eventBusClient.eventBusClient):
     '''Network monitoring entity for the DAGroot node. Required in OpenVisualizer
@@ -48,26 +63,36 @@ class Nethead(eventBusClient.eventBusClient):
     DAGroot application messaging must originate/terminate with OpenVisualizer.
     
     When DAGroot is established, Nethead class registers with Nethead home peer 
-    by sending a 'hello' message.
+    by sending a 'hello' message. When Nethead home confirms the registration,
+    begins sending RSS reports once per minute.
     '''
     
-    def __init__(self):
+    def __init__(self, ovApp):
+        '''Initialize
+        
+        :param ovApp:  [in] OpenVisualizer application instance; required to retrieve
+                            mote state
+        '''
         
         # log
         log.info('create instance')
         
         # store params
         self.stateLock            = threading.Lock()
+        self.ovApp                = ovApp
         self.networkPrefix        = None
         self.dagRootEui64         = None
         self.lastMessageId        = random.randint(0, 0xFFFF)
         self._lastEphemeralPort   = None
         self.isRegistered         = False
+        self.timer                = None
+        
+        self.RSS_INTERVAL         = 60
          
         # initialize parent class
         eventBusClient.eventBusClient.__init__(
             self,
-            name = 'OpenLBR',
+            name = 'Nethead',
             registrations =  [
                 {
                     'sender'   : self.WILDCARD,
@@ -99,28 +124,51 @@ class Nethead(eventBusClient.eventBusClient):
             if self.networkPrefix:
                 log.info('Sending hello message to Nethead home')
                 try:
-                    self._sendHello()
+                    messenger = Messenger(self.networkPrefix + self.dagRootEui64)
+                    messenger.send(self._createHelloMessage(), 
+                                   NETHEAD_HOME,
+                                   lambda: self._recvHello_notif())
                 except:
-                    log.exception('Failed to send hello to Nethead home')
+                    log.exception('Failed to send hello message to Nethead home')
                     
-    def _recvHello_notif(self, sender, signal, data):
-        '''Handles response from Nethead home to confirm registration.
+    def _recvHello_notif(self):
+        '''Handles response from Nethead home to confirm registration, and schedules
+        RSS messaging.
         '''
         # No app payload, just remember registration
         isRegistered = True
-        log.info('Received hello response')
-        # Only registered for this single response, so unregister.
-        self.unregister(
-            sender            = self.WILDCARD,
-            signal            = (
-                tuple(self.networkPrefix + self.dagRootEui64),
-                OpenLbr.IANA_UDP,
-                self._lastEphemeralPort),
-            callback          = self._recvHello_notif)
+        log.info('Received hello reply')
+
+        self.timer = threading.Timer(self.RSS_INTERVAL, self._sendRssMessage)
+        self.timer.start()
+                    
+    def _recvRss_notif(self):
+        '''Handles response from Nethead home to confirm posting RSS readings, and
+        schedules the next message.
+        '''
+        log.info('Received rss reply')
+
+        self.timer = threading.Timer(self.RSS_INTERVAL, self._sendRssMessage)
+        self.timer.start()
+        
+    def _sendRssMessage(self):
+        '''Creates and sends '/nh/rss' message to Nethead home. Queries ??? for
+        latest RSS value.
+        '''
+        log.info('Sending rss message to Nethead home')
+        try:
+            messenger = Messenger(self.networkPrefix + self.dagRootEui64)
+            messenger.send(self._createRssMessage(), 
+                           NETHEAD_HOME,
+                           lambda: self._recvRss_notif())
+        except:
+            log.exception('Failed to send RSS message to Nethead home')
+            # Maybe better luck next time
+            self.timer = threading.Timer(self.RSS_INTERVAL, self._sendRssMessage)
+            self.timer.start()
             
-    def _sendHello(self):
-        '''Send '/nh/lo' message to Nethead home, and prepare to wait for home's 
-        response.
+    def _createHelloMessage(self):
+        '''Creates '/nh/lo' message for Nethead home.
         '''
         msg             = CoapMessage()
         # header
@@ -138,61 +186,79 @@ class Nethead(eventBusClient.eventBusClient):
             CoapOption(OptionType.UriPath, 'nh'),
             CoapOption(OptionType.UriPath, 'lo')
         ]
-        
-        self._lastEphemeralPort = random.randint(49152,65535)
-        self.register(
-            sender            = self.WILDCARD,
-            signal            = (
-                tuple(self.networkPrefix + self.dagRootEui64),
-                OpenLbr.IANA_UDP,
-                self._lastEphemeralPort),
-            callback          = self._recvHello_notif)
-        
-        # write packet
-        srcAddr = self.networkPrefix + self.dagRootEui64
-        dstAddr = NETHEAD_HOME
-
-        log.debug('Serializing CoAP message')
-        pkt     = list(msgModule.serialize(msg))        # convert from bytearray to list
-                                                        # for compatibility with OpenWSN
-        pkt[:0] = self._writeUdpHeader(pkt, srcAddr, dstAddr, self._lastEphemeralPort)
-        pkt[:0] = self._writeIpv6Header(pkt, srcAddr, dstAddr)
-        
-        self.dispatch('v6ToInternet', pkt)
-        
-    def _writeUdpHeader(self, payload, srcAddr, dstAddr, srcPort):
-        '''Writes UDP header fields to a byte list.
-        
-        :returns: byte list
+        return msg
+            
+    def _createRssMessage(self):
+        '''Creates '/nh/rss' message for Nethead home. Expects only a single neighbor,
+        and logs warnings otherwise.
         '''
-        hdr  = int2buf(srcPort, 2)                    # src port (ephemeral) 
-                                                      # http://tools.ietf.org/html/rfc6335
-        hdr += int2buf(5683, 2)                       # dest port, CoAP default
-        hdr += int2buf(8+len(payload), 2)             # length
+        msg             = CoapMessage()
+        # header
+        msg.tokenLength = 2
+        msg.token       = int2buf(random.randint(0,0xFFFF), 2)
+        msg.codeClass   = CodeClass.Request
+        msg.codeDetail  = RequestCode.POST
+        msg.messageType = MessageType.NON
+        with self.stateLock:
+            msg.messageId      = self.lastMessageId+1 if self.lastMessageId < 0xFFFF else 0
+            self.lastMessageId = msg.messageId
 
-        pseudoHdr  = []
-        pseudoHdr += srcAddr
-        pseudoHdr += dstAddr
-        pseudoHdr += int2buf(8+len(payload), 4)
-        pseudoHdr += int2buf(OpenLbr.IANA_UDP, 4)
+        # options
+        msg.options = [
+            CoapOption(OptionType.UriPath, 'nh'),
+            CoapOption(OptionType.UriPath, 'rss'),
+            CoapOption(OptionType.ContentFormat, MediaType.Json)
+        ]
         
-        hdr += u.calculateUdpChecksum(pseudoHdr, hdr, payload)  # checksum
-        return hdr
+        # Payload of latest RSS reading
+        rssValues = self._readRss()
+        if rssValues:
+            for k,v in rssValues.iteritems():
+                msg.payloadStr(json.dumps({'n': k, 's': v}))
+                log.debug('Created RSS payload for neighbor {0}'.format(k))
+                if len(rssValues) > 1:
+                    warnText = 'Found {0} neighbors for RSS payload; only used the first one'
+                    log.warn(warnText.format(len(rssValues)))
+                    break
+        else:
+            log.warn('No neighbors found for RSS message')
+            raise KeyError
+                
+        return msg
         
-    def _writeIpv6Header(self, payload, srcAddr, dstAddr):
-        '''Writes IPv6 header fields to a byte list.
+    def _readRss(self):
+        '''Reads RSS values from moteState module for DAGroot node.
         
-        :returns: byte list
+        :returns: Dictionary with key of neighbor address as a string with format
+                  'xxxx', and value of RSS reading
         '''
-        hdr  = [6<<4]                # v6 + traffic class (upper nybble)
-        hdr += [0x00]*3              # traffic class (lower nybble) + flow label
-                                     # default PHB; RFC 2474, sec. 4.1
-                                     # no flow; RFC 2460, app. A
-        hdr += payload[4:6]          # payload length
-        hdr += [OpenLbr.IANA_UDP]    # next header / protocol
-        hdr += [64]                  # hop limit
-                                     # http://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
-        hdr += srcAddr               # source
-        hdr += dstAddr               # destination
-        return hdr
-        
+        dagRoot16 = buf2hex(self.dagRootEui64[-2:])
+        rootState = self.ovApp.getMoteState(dagRoot16)
+        rssValues = {}
+        if rootState:
+            log.debug('Found moteState for dagRoot {0}'.format(dagRoot16))
+            nbrTable = rootState.getStateElem(rootState.ST_NEIGHBORS)
+            if not nbrTable:
+                log.warn('Can\'t find nbrTable')
+                return
+                
+            rowIndex = 0
+            for row in nbrTable.data:
+                nbrAddr = row.data[0]['addr']
+                if nbrAddr.addr:
+                    nbrRssi = row.data[0]['rssi']
+                    if nbrRssi.rssi:
+                        # Only use last two bytes of address
+                        rssValues[buf2hex(nbrAddr.addr[-2:])] = nbrRssi.rssi
+                        log.debug('Found RSS value at row {0}; nbrAddr: {1}'.format(rowIndex, 
+                                                                                    u.formatAddr(nbrAddr.addr)))
+                    else:
+                        log.debug('Can\'t find nbrRssi at row {0}'.format(rowIndex))
+                else:
+                    log.debug('Skipping row {0}; no neighbor'.format(rowIndex))
+                rowIndex = rowIndex + 1
+        else:
+            log.error('Can\'t find moteState for {0}'.format(dagRoot16))
+            raise KeyError
+
+        return rssValues
