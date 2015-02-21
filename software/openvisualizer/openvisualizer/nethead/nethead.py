@@ -189,8 +189,7 @@ class Nethead(eventBusClient.eventBusClient):
         return msg
             
     def _createRssMessage(self):
-        '''Creates '/nh/rss' message for Nethead home. Expects only a single neighbor,
-        and logs warnings otherwise.
+        '''Creates '/nh/rss' message for Nethead home.
         '''
         msg             = CoapMessage()
         # header
@@ -213,13 +212,8 @@ class Nethead(eventBusClient.eventBusClient):
         # Payload of latest RSS reading
         rssValues = self._readRss()
         if rssValues:
-            for k,v in rssValues.iteritems():
-                msg.payloadStr(json.dumps({'n': k, 's': v}))
-                log.debug('Created RSS payload for neighbor {0}'.format(k))
-                if len(rssValues) > 1:
-                    warnText = 'Found {0} neighbors for RSS payload; only used the first one'
-                    log.warn(warnText.format(len(rssValues)))
-                    break
+            msg.payloadStr(json.dumps(rssValues))
+            log.debug('Added neighbors to RSS payload')
         else:
             log.warn('No neighbors found for RSS message')
             raise KeyError
@@ -229,8 +223,8 @@ class Nethead(eventBusClient.eventBusClient):
     def _readRss(self):
         '''Reads RSS values from moteState module for DAGroot node.
         
-        :returns: Dictionary with key of neighbor address as a string with format
-                  'xxxx', and value of RSS reading
+        :return: Dictionary with key of last two bytes of neighbor address as 
+                 a hex string, with format 'xxxx'; and value of the RSS reading.
         '''
         dagRoot16 = buf2hex(self.dagRootEui64[-2:])
         rootState = self.ovApp.getMoteState(dagRoot16)
@@ -254,8 +248,6 @@ class Nethead(eventBusClient.eventBusClient):
                                                                                     u.formatAddr(nbrAddr.addr)))
                     else:
                         log.debug('Can\'t find nbrRssi at row {0}'.format(rowIndex))
-                else:
-                    log.debug('Skipping row {0}; no neighbor'.format(rowIndex))
                 rowIndex = rowIndex + 1
         else:
             log.error('Can\'t find moteState for {0}'.format(dagRoot16))
